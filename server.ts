@@ -25,6 +25,13 @@ interface ServerMessage {
     text?: string;
     done?: boolean;
     error?: string;
+    customerInfo?: {
+        name?: string;
+        address?: string;
+        phone?: string;
+        systemType?: string;
+        issue?: string;
+    };
 }
 
 app.get("/", (req, res) => {
@@ -40,7 +47,7 @@ const wss = new WebSocketServer({ server });
 wss.on("connection", (ws: WebSocket) => {
     console.log("New WebSocket client connected.");
 
-    ws.on("message", async (message: string) => {
+    const messageHandler = async (message: string) => {
         let parsedMessage: ClientMessage;
 
         try {
@@ -57,6 +64,10 @@ wss.on("connection", (ws: WebSocket) => {
         const { prompt } = parsedMessage;
         conversationHistory.push({ role: "user", content: prompt });
 
+        console.log("here is the prompt:", prompt);
+
+        console.log(conversationHistory)
+
         try {
             const textResponse = await openai.chat.completions.create({
                 model: "gpt-4o",
@@ -67,32 +78,40 @@ wss.on("connection", (ws: WebSocket) => {
             });
 
             let fullResponse = "";
+            let customerInfo: ServerMessage["customerInfo"] = {};
 
             for await (const chunk of textResponse) {
-                const textChunk = chunk.choices[0]?.delta?.content;
+                const textChunk = chunk.choices?.[0]?.delta?.content;
                 if (textChunk) {
                     fullResponse += textChunk;
                     ws.send(JSON.stringify({ text: textChunk }));
                 }
             }
+            console.log(fullResponse)
 
             conversationHistory.push({ role: "assistant", content: fullResponse });
+
+            setTimeout(() => ws.send(JSON.stringify({ customerInfo })), 100);
             startElevenLabsStream(ws, fullResponse);
         } catch (error) {
             ws.send(JSON.stringify({ error: "Processing error" }));
         }
-    });
+    };
 
-  
+    ws.on("message", messageHandler);
+
+    ws.on("close", () => {
+        console.log("🔴 WebSocket closed.");
+        ws.removeListener("message", messageHandler);
+    });
 });
 
 function startElevenLabsStream(ws: WebSocket, text: string): void {
-
     axios
         .post(
             `https://api.elevenlabs.io/v1/text-to-speech/${VOICE_ID}/stream`,
             {
-                text: text,
+                text,
                 model_id: "eleven_multilingual_v2",
                 voice_settings: { stability: 0.4, similarity_boost: 0.85, style: 0.6, speed: 1.0 },
             },
@@ -102,15 +121,12 @@ function startElevenLabsStream(ws: WebSocket, text: string): void {
             }
         )
         .then((response) => {
-            let totalChunks = 0;
             let hasAudioData = false;
 
             response.data.on("data", (chunk: Buffer) => {
-                if (!hasAudioData) {
-                    hasAudioData = true;
-                }
-                totalChunks++;
+                hasAudioData = true;
                 ws.send(chunk);
+                ws.send(JSON.stringify({ conversationHistory }));
             });
 
             response.data.on("end", () => {
@@ -131,10 +147,6 @@ function startElevenLabsStream(ws: WebSocket, text: string): void {
             console.error("❌ Error with ElevenLabs:", err);
             ws.send(JSON.stringify({ error: "TTS processing error" }));
         });
-
-    ws.on("close", () => {
-        console.log("🔴 WebSocket closed.");
-    });
 }
 
 console.log(`✅ WebSocket server is running on ws://localhost:${WS_PORT}`);
